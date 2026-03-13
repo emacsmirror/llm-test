@@ -12,10 +12,61 @@ test infrastructure.
 
 1. You write test specs in YAML files describing what to test in plain English.
 2. ~llm-test~ parses these YAML files and registers an ERT test for each spec.
-3. When a test runs, a fresh Emacs process (~emacs -Q~) is launched.
+3. When a test runs, a fresh Emacs process (~emacs -Q~) is launched as a daemon.
 4. An LLM agent interprets the test description, drives the fresh Emacs via
    tool calls (eval elisp, send keys, inspect buffers, etc.), and determines
    whether the test passes or fails.
+
+** The Agent Loop
+
+When an ERT test runs, ~llm-test~ sends the setup instructions and test
+description to the LLM as a chat prompt with a set of tools.  The LLM responds
+with tool calls, which ~llm-test~ executes and returns the results.  This
+continues in an async loop -- each iteration is one LLM request/response round
+trip -- until the agent calls ~pass-test~ or ~fail-test~, or the iteration limit
+(~llm-test-max-iterations~, default 20) is reached.
+
+** Available Tools
+
+On each iteration the agent may call any of these tools:
+
+- *eval-elisp* -- Evaluate arbitrary Emacs Lisp in the test subprocess and
+  return the printed result.  Used for programmatic setup, state inspection, and
+  anything that doesn't require simulating user input.
+- *send-keys* -- Queue a key sequence (in Emacs ~kbd~ notation, e.g. ~C-x C-f~,
+  ~M-x~, ~RET~) into the test Emacs as if typed by a user.  This is
+  non-blocking: it schedules the keys via ~unread-command-events~ and returns
+  immediately.  The agent must then inspect the result with another tool.
+- *get-buffer-contents* -- Return the text currently visible in the window
+  displaying a given buffer.  This uses ~window-start~ / ~window-end~ so it
+  returns only what a human would see on screen, not the full buffer.  The agent
+  can scroll with ~send-keys~ and call this again to see more.
+- *get-buffer-list* -- List all buffer names in the test Emacs.
+- *get-minibuffer-contents* -- Check whether the minibuffer is active (e.g.
+  after ~M-x~ or a ~completing-read~ prompt) and return the prompt text and any
+  input entered so far.  The agent uses this to detect prompts and then responds
+  via ~send-keys~.
+- *suggest-improvement* -- Record a UI/UX suggestion about the package under
+  test.  This does not affect the pass/fail verdict.
+- *pass-test* / *fail-test* -- Declare the test outcome and end the loop.
+
+** How the Agent "Sees" Emacs
+
+The test Emacs runs as a daemon with a frame sized to ~llm-test-frame-width~ x
+~llm-test-frame-height~ (default 80x40).  The agent never sees a graphical
+display.  Instead, it reads the state of Emacs through the tools above:
+
+- *Buffer contents*: ~get-buffer-contents~ returns the text between
+  ~window-start~ and ~window-end~ for the window showing the requested buffer.
+  If no window is showing the buffer, it is temporarily displayed in the
+  selected window and a ~redisplay~ is forced so the window boundaries are
+  meaningful.
+- *Minibuffer*: ~get-minibuffer-contents~ checks for an active minibuffer window
+  and returns ~minibuffer-prompt~ and ~minibuffer-contents-no-properties~.  This
+  lets the agent detect when a command is waiting for user input and respond
+  appropriately.
+- *Programmatic state*: ~eval-elisp~ can query any Emacs state -- point
+  position, mode, variable values, overlays, text properties, etc.
 
 * YAML Test Format
 
