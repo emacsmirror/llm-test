@@ -181,13 +181,10 @@ API responses) while waiting, which would cause re-entrant callbacks."
          (socket-dir (plist-get emacs-info :socket-dir)))
     (with-temp-buffer
       (let ((exit-code
-             (with-timeout (llm-test-timeout
-                            (error "emacsclient timed out after %d seconds"
-                                   llm-test-timeout))
-               (call-process "emacsclient" nil t nil
-                             (format "--socket-name=%s"
-                                     (expand-file-name server-name socket-dir))
-                             "--eval" sexp))))
+             (call-process "emacsclient" nil t nil
+                           (format "--socket-name=%s"
+                                   (expand-file-name server-name socket-dir))
+                           "--eval" sexp)))
         (if (= exit-code 0)
             (string-trim (buffer-string))
           (error "emacsclient eval failed (exit %d): %s"
