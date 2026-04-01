@@ -1,0 +1,2 @@
+* 0.1.1
+- Added =require= for all common providers so users don't need to specifically require them.

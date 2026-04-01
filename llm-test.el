@@ -37,6 +37,12 @@
 
 (require 'llm)
 (require 'yaml)
+(require 'llm-openai nil t)
+(require 'llm-claude nil t)
+(require 'llm-gemini nil t)
+(require 'llm-vertex nil t)
+(require 'llm-ollama nil t)
+
 (require 'ert)
 (require 'cl-lib)
 (require 'futur)
@@ -44,7 +50,6 @@
 (defgroup llm-test nil
   "LLM-driven testing for Emacs packages."
   :group 'tools)
-
 (defcustom llm-test-emacs-executable "emacs"
   "Path to the Emacs executable used to run tests.
 A fresh Emacs process (`emacs -Q') is launched for each test."
