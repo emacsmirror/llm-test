@@ -527,37 +527,38 @@ iteration limit."
                 :suggestions (cdr suggestions)))
     (when llm-test-debug
       (message "llm-test iteration %d: calling llm-chat-async" iteration))
-    (llm-chat-async
-     provider prompt
-     (lambda (result)
-       (when llm-test-debug
-         (message "llm-test iteration %d: got response, tool-results=%S"
-                  iteration (and (plistp result)
-                                 (plist-get result :tool-results))))
-       (let* ((tool-results (plist-get result :tool-results))
-              (pass-result (assoc-default "pass-test" tool-results))
-              (fail-result (assoc-default "fail-test" tool-results)))
-         (cond
-          (pass-result
-           (funcall callback
-                    (make-llm-test-result :passed-p t :reason pass-result
-                                          :suggestions (cdr suggestions))))
-          (fail-result
-           (funcall callback
-                    (make-llm-test-result :passed-p nil :reason fail-result
-                                          :suggestions (cdr suggestions))))
-          (t
-           (llm-test--run-test-async provider prompt (1+ iteration)
-                                     suggestions callback)))))
-     (lambda (_ err)
-       (when llm-test-debug
-         (message "llm-test iteration %d: LLM error: %s" iteration err))
-       (funcall callback
-                (make-llm-test-result
-                 :passed-p nil
-                 :reason (format "LLM error: %s" err)
-                 :suggestions (cdr suggestions))))
-     t)))
+    (let ((llm-warn-on-nonfree nil))
+      (llm-chat-async
+       provider prompt
+       (lambda (result)
+         (when llm-test-debug
+           (message "llm-test iteration %d: got response, tool-results=%S"
+                    iteration (and (plistp result)
+                                   (plist-get result :tool-results))))
+         (let* ((tool-results (plist-get result :tool-results))
+                (pass-result (assoc-default "pass-test" tool-results))
+                (fail-result (assoc-default "fail-test" tool-results)))
+           (cond
+            (pass-result
+             (funcall callback
+                      (make-llm-test-result :passed-p t :reason pass-result
+                                            :suggestions (cdr suggestions))))
+            (fail-result
+             (funcall callback
+                      (make-llm-test-result :passed-p nil :reason fail-result
+                                            :suggestions (cdr suggestions))))
+            (t
+             (llm-test--run-test-async provider prompt (1+ iteration)
+                                       suggestions callback)))))
+       (lambda (_ err)
+         (when llm-test-debug
+           (message "llm-test iteration %d: LLM error: %s" iteration err))
+         (funcall callback
+                  (make-llm-test-result
+                   :passed-p nil
+                   :reason (format "LLM error: %s" err)
+                   :suggestions (cdr suggestions))))
+       t))))
 
 (defun llm-test--run-test (provider emacs-info group-setup test-spec)
   "Run a single test using PROVIDER against EMACS-INFO.
@@ -573,10 +574,11 @@ so that Emacs remains responsive."
          (tools (llm-test--apply-tool-wrapping
                  (llm-test--make-tools emacs-info suggestions)
                  emacs-info))
-         (prompt (llm-make-chat-prompt
-                  user-message
-                  :context llm-test--system-prompt
-                  :tools tools))
+         (prompt (let ((llm-warn-on-nonfree nil))
+                   (llm-make-chat-prompt
+                    user-message
+                    :context llm-test--system-prompt
+                    :tools tools)))
          (done nil)
          (final-result nil))
     (llm-test--run-test-async
