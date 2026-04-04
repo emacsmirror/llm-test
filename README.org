@@ -101,6 +101,14 @@ tests:
 
 This package requires the [[https://github.com/ahyatt/llm][llm]] package and [[https://github.com/zkry/yaml.el][yaml.el]].
 
+It is available on MELPA, so assuming you have added MELPA to your allowed archives, you can install with: 
+
+#+begin_src emacs-lisp
+(use-package llm-test)
+#+end_src
+
+The package is mainly for use by other package authors.
+
 * Usage
 
 #+begin_src emacs-lisp
@@ -131,4 +139,4 @@ Emacs subprocess starts, before any test setup or execution.
 
 * Status
 
-This project is in early development.
+This project is in early development, and may go through significant changes, but it usable as-is.

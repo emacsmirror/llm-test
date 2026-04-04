@@ -3,5 +3,3 @@
 (eldev-use-package-archive 'gnu-elpa)
 (eldev-use-package-archive 'melpa)
 (eldev-use-plugin 'maintainer)
-(eldev-add-loading-roots ".")
-(setf eldev-project-loading-roots '("." "./test"))

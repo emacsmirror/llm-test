@@ -1,10 +1,10 @@
-;;; llm-test.el --- LLM-driven testing for Emacs packages -*- lexical-binding: t -*-
+;;; llm-test.el --- LLM-driven testing for packages -*- lexical-binding: t -*-
 
 ;; Copyright (c) 2026  Andrew Hyatt <ahyatt@gmail.com>
 
 ;; Author: Andrew Hyatt <ahyatt@gmail.com>
 ;; Homepage: https://github.com/ahyatt/llm-test
-;; Package-Requires: ((emacs "28.1") (llm "0.18.0") (yaml "0.5.0") (futur "1.2"))
+;; Package-Requires: ((emacs "29.1") (llm "0.18.0") (yaml "0.5.0") (futur "1.2"))
 ;; Keywords: testing, tools
 ;; Version: 0.1.0
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -37,6 +37,12 @@
 
 (require 'llm)
 (require 'yaml)
+(require 'llm-openai nil t)
+(require 'llm-claude nil t)
+(require 'llm-gemini nil t)
+(require 'llm-vertex nil t)
+(require 'llm-ollama nil t)
+
 (require 'ert)
 (require 'cl-lib)
 (require 'futur)
@@ -44,7 +50,6 @@
 (defgroup llm-test nil
   "LLM-driven testing for Emacs packages."
   :group 'tools)
-
 (defcustom llm-test-emacs-executable "emacs"
   "Path to the Emacs executable used to run tests.
 A fresh Emacs process (`emacs -Q') is launched for each test."
@@ -126,11 +131,13 @@ The YAML should contain a single group document with keys:
 (defvar llm-test--server-name-counter 0
   "Counter for generating unique server names.")
 
-(cl-defun llm-test--start-emacs (&key load-path init-forms)
+(cl-defun llm-test--start-emacs (&key extra-load-path init-forms)
   "Start a fresh Emacs process for testing.
-LOAD-PATH is a list of directories to add to the subprocess `load-path'.
-INIT-FORMS is a list of elisp forms to evaluate at startup.
-Returns a plist with :process, :server-name, :socket-dir, and :init-file."
+EXTRA-LOAD-PATH is a list of directories to add to the subprocess
+`load-path'.
+
+INIT-FORMS is a list of elisp forms to evaluate at startup.  Returns a
+plist with :process, :server-name, :socket-dir, and :init-file."
   (let* ((server-name (format "llm-test-%d-%d"
                               (emacs-pid)
                               (cl-incf llm-test--server-name-counter)))
@@ -139,7 +146,7 @@ Returns a plist with :process, :server-name, :socket-dir, and :init-file."
          (_ (with-temp-file init-file
               (insert (format "(setq server-socket-dir %S server-name %S)\n"
                               socket-dir server-name))
-              (dolist (dir load-path)
+              (dolist (dir extra-load-path)
                 (insert (format "(add-to-list 'load-path %S)\n" dir)))
               (dolist (form init-forms)
                 (insert (format "%S\n" form)))))
@@ -631,7 +638,8 @@ iteration limit."
                 :reason (format "Agent did not reach a verdict after %d iterations"
                                 llm-test-max-iterations)
                 :suggestions (cdr suggestions)))
-    (let ((start-time (float-time)))
+    (let ((start-time (float-time))
+          (llm-warn-on-nonfree nil))
       (when llm-test-debug
         (message "llm-test iteration %d: calling llm-chat-async" iteration))
       (llm-chat-async
@@ -685,10 +693,11 @@ so that Emacs remains responsive."
          (tools (llm-test--apply-tool-wrapping
                  (llm-test--make-tools emacs-info suggestions)
                  emacs-info))
-         (prompt (llm-make-chat-prompt
-                  user-message
-                  :context llm-test--system-prompt
-                  :tools tools))
+         (prompt (let ((llm-warn-on-nonfree nil))
+                   (llm-make-chat-prompt
+                    user-message
+                    :context llm-test--system-prompt
+                    :tools tools)))
          (done nil)
          (final-result nil))
     (llm-test--run-test-async
@@ -720,10 +729,14 @@ Returns a list of `llm-test-group' structs."
                        (directory-files directory t "\\.yml\\'"))))
     (mapcar #'llm-test--parse-yaml-file files)))
 
-(cl-defun llm-test-register-tests (directory &key provider load-path init-forms)
+(cl-defun llm-test-register-tests (directory &key provider extra-load-path
+                                             init-forms)
   "Load YAML test specs from DIRECTORY and register them as ERT tests.
 PROVIDER is the LLM provider to use; defaults to `llm-test-provider'.
-LOAD-PATH is a list of directories to add to the test subprocess `load-path'.
+
+EXTRA-LOAD-PATH is a list of directories to add to the test subprocess
+`load-path'.
+
 INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
   (let ((groups (llm-test-load-directory directory))
         (provider (or provider llm-test-provider)))
@@ -737,7 +750,7 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                  do (let ((the-test test)
                           (the-setup setup)
                           (the-provider provider)
-                          (the-load-path load-path)
+                          (the-load-path extra-load-path)
                           (the-init-forms init-forms))
                       (ert-set-test
                        test-name
@@ -748,7 +761,7 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                                                idx description)
                         :body (lambda ()
                                 (let ((emacs-info (llm-test--start-emacs
-                                                   :load-path the-load-path
+                                                   :extra-load-path the-load-path
                                                    :init-forms the-init-forms)))
                                   (unwind-protect
                                       (let ((result (llm-test--run-test
