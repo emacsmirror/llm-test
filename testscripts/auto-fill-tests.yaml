@@ -7,6 +7,9 @@ tests:
       Type a long paragraph that exceeds fill-column.
       Verify that the text is automatically wrapped at or before column 40.
   - description: |
+      Before typing, evaluate
+      `(setq-local adaptive-fill-regexp "[ \t]*[0-9]+\\.[ \t]*")`
+      in the test buffer to enable numbered-list indentation.
       Type a numbered list item (starting with "1. ") that exceeds fill-column.
       Verify that continuation lines are indented to align with the text
       after the list marker.

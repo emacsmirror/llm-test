@@ -1,12 +1,60 @@
 ;;; llm-test-test.el --- Tests for llm-test -*- lexical-binding: t -*-
 
 ;;; Commentary:
-;; Tests for the llm-test YAML parsing and data structures.
+;; Tests for the llm-test YAML parsing and runtime behavior.
 
 ;;; Code:
 
 (require 'llm-test)
 (require 'ert)
+
+(defun llm-test-test--testscripts-directory ()
+  "Return the absolute path to the sample YAML test scripts."
+  (expand-file-name "testscripts"
+                    (file-name-directory (locate-library "llm-test"))))
+
+(llm-test-register-tests (llm-test-test--testscripts-directory))
+
+(ert-deftest llm-test-provider-from-elisp ()
+  "Provider Elisp should evaluate to the constructed provider."
+  (should (eq (llm-test--provider-from-elisp "(progn 'test-provider)")
+              'test-provider)))
+
+(ert-deftest llm-test-provider-from-elisp-trailing-data ()
+  "Provider Elisp with trailing forms should signal an error."
+  (should-error (llm-test--provider-from-elisp "'one 'two")))
+
+(ert-deftest llm-test-provider-from-environment ()
+  "The provider should be read from `LLM_TEST_PROVIDER_ELISP'."
+  (let ((process-environment (copy-sequence process-environment)))
+    (setenv llm-test-provider-elisp-environment-variable
+            "(progn 'env-provider)")
+    (should (eq (llm-test--provider-from-environment)
+                'env-provider))))
+
+(ert-deftest llm-test-provider-from-environment-invalid ()
+  "Invalid provider Elisp in the environment should fail clearly."
+  (let ((process-environment (copy-sequence process-environment)))
+    (setenv llm-test-provider-elisp-environment-variable "(")
+    (should-error (llm-test--provider-from-environment))))
+
+(ert-deftest llm-test-resolve-provider-precedence ()
+  "Explicit providers should override variable and environment fallback."
+  (let ((process-environment (copy-sequence process-environment))
+        (llm-test-provider 'configured-provider))
+    (setenv llm-test-provider-elisp-environment-variable
+            "(progn 'env-provider)")
+    (should (eq (llm-test--resolve-provider 'explicit-provider)
+                'explicit-provider))
+    (should (eq (llm-test--resolve-provider)
+                'configured-provider))))
+
+(ert-deftest llm-test-resolve-provider-missing ()
+  "Missing provider configuration should signal a clear error."
+  (let ((process-environment (copy-sequence process-environment))
+        (llm-test-provider nil))
+    (setenv llm-test-provider-elisp-environment-variable nil)
+    (should-error (llm-test--resolve-provider))))
 
 (ert-deftest llm-test-parse-simple-yaml ()
   "Parsing a simple YAML spec should produce the correct group struct."
@@ -47,10 +95,9 @@
 
 (ert-deftest llm-test-load-directory ()
   "Loading a directory should find all YAML files."
-  (let ((dir (expand-file-name "testscripts"
-                               (file-name-directory (locate-library "llm-test")))))
-    (let ((groups (llm-test-load-directory dir)))
-      (should (>= (length groups) 3)))))
+  (let ((groups (llm-test-load-directory
+                 (llm-test-test--testscripts-directory))))
+    (should (= (length groups) 4))))
 
 ;;; Slugify tests
 
@@ -63,15 +110,13 @@
 
 (ert-deftest llm-test-register-creates-ert-tests ()
   "Registering tests from a directory should create ERT test symbols."
-  (let ((dir (expand-file-name "testscripts"
-                               (file-name-directory (locate-library "llm-test")))))
-    ;; Use a dummy provider - we won't actually run the tests
-    (llm-test-register-tests dir :provider 'dummy-provider)
-    (should (ert-test-boundp 'llm-test/auto-fill-mode/1))
-    (should (ert-test-boundp 'llm-test/auto-fill-mode/2))
-    (should (ert-test-boundp 'llm-test/basic-editing/1))
-    (should (ert-test-boundp 'llm-test/basic-editing/2))
-    (should (ert-test-boundp 'llm-test/visual-line-mode/1))))
+  (should (ert-test-boundp 'llm-test/auto-fill-mode/1))
+  (should (ert-test-boundp 'llm-test/auto-fill-mode/2))
+  (should (ert-test-boundp 'llm-test/basic-editing/1))
+  (should (ert-test-boundp 'llm-test/basic-editing/2))
+  (should (ert-test-boundp 'llm-test/fido-mode-completion/1))
+  (should (ert-test-boundp 'llm-test/fido-mode-completion/2))
+  (should (ert-test-boundp 'llm-test/visual-line-mode/1)))
 
 ;;; Subprocess control tests
 

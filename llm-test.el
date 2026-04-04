@@ -31,6 +31,7 @@
 ;; Usage:
 ;;   (require 'llm-test)
 ;;   (setq llm-test-provider (make-llm-openai :key "..."))
+;;   ;; or set LLM_TEST_PROVIDER_ELISP in the environment
 ;;   (llm-test-register-tests "path/to/testscripts/")
 
 ;;; Code:
@@ -62,6 +63,53 @@ This should be an object created by one of the `make-llm-*' constructors
 from the `llm' package."
   :type 'sexp
   :group 'llm-test)
+
+(defcustom llm-test-provider-elisp-environment-variable
+  "LLM_TEST_PROVIDER_ELISP"
+  "Environment variable containing Elisp to construct a provider.
+When `llm-test-provider' and `:provider' are both nil, `llm-test'
+evaluates the value of this environment variable and uses the result as
+the provider.  The Elisp is trusted and should construct an LLM provider
+object, typically with a single `progn' form."
+  :type 'string
+  :group 'llm-test)
+
+(defun llm-test--provider-from-elisp (provider-elisp)
+  "Evaluate PROVIDER-ELISP and return the resulting provider."
+  (let* ((trimmed (string-trim provider-elisp))
+         (read-result (read-from-string trimmed))
+         (form (car read-result))
+         (position (cdr read-result)))
+    (unless (string-match-p "\\`[[:space:]]*\\'"
+                            (substring trimmed position))
+      (error "Provider Elisp contained trailing data"))
+    (let ((provider (eval form t)))
+      (unless provider
+        (error "Provider Elisp evaluated to nil"))
+      provider)))
+
+(defun llm-test--provider-from-environment ()
+  "Return a provider constructed from the environment, or nil if unset."
+  (let ((provider-elisp
+         (getenv llm-test-provider-elisp-environment-variable)))
+    (when (and provider-elisp
+               (not (string-match-p "\\`[[:space:]]*\\'" provider-elisp)))
+      (condition-case err
+          (llm-test--provider-from-elisp provider-elisp)
+        (error
+         (error "Failed to evaluate %s: %s"
+                llm-test-provider-elisp-environment-variable
+                (error-message-string err)))))))
+
+(defun llm-test--resolve-provider (&optional provider)
+  "Resolve PROVIDER, falling back to configuration and the environment.
+Explicit PROVIDER takes precedence."
+  (or provider
+      llm-test-provider
+      (llm-test--provider-from-environment)
+      (error
+       "No LLM provider configured.  Set `llm-test-provider', pass :provider, or set %s"
+       llm-test-provider-elisp-environment-variable)))
 
 (defcustom llm-test-frame-width 80
   "Width in columns of the frame created in the test Emacs process."
@@ -612,15 +660,15 @@ Returns a list of `llm-test-group' structs."
 
 (cl-defun llm-test-register-tests (directory &key provider extra-load-path
                                              init-forms)
-  "Load YAML test specs from DIRECTORY and register them as ERT tests.
-PROVIDER is the LLM provider to use; defaults to `llm-test-provider'.
+  "Register YAML test specs from DIRECTORY with ERT.
+PROVIDER is the LLM provider to use; defaults to `llm-test-provider'
+or the Elisp in `llm-test-provider-elisp-environment-variable'.
 
 EXTRA-LOAD-PATH is a list of directories to add to the test subprocess
 `load-path'.
 
 INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
-  (let ((groups (llm-test-load-directory directory))
-        (provider (or provider llm-test-provider)))
+  (let ((groups (llm-test-load-directory directory)))
     (dolist (group groups)
       (let ((group-slug (llm-test--slugify (llm-test-group-name group)))
             (setup (llm-test-group-setup group)))
@@ -646,7 +694,9 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                                                    :init-forms the-init-forms)))
                                   (unwind-protect
                                       (let ((result (llm-test--run-test
-                                                     the-provider emacs-info
+                                                     (llm-test--resolve-provider
+                                                      the-provider)
+                                                     emacs-info
                                                      the-setup the-test)))
                                         (llm-test--report-result result))
                                     (llm-test--stop-emacs emacs-info))))))))))))

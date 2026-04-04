@@ -3,3 +3,6 @@
 (eldev-use-package-archive 'gnu-elpa)
 (eldev-use-package-archive 'melpa)
 (eldev-use-plugin 'maintainer)
+
+(setq eldev-main-fileset '("./llm-test.el"))
+(setq eldev-test-fileset '("./llm-test-test.el"))
