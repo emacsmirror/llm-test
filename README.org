@@ -121,6 +121,23 @@ The package is mainly for use by other package authors.
 ;; Then run with M-x ert or (ert-run-tests-batch)
 #+end_src
 
+If you don't pass ~:provider~ and don't set ~llm-test-provider~, ~llm-test~
+will look for an environment variable named ~LLM_TEST_PROVIDER_ELISP~.  Its
+value should be trusted elisp that constructs a provider object.
+
+For command-line usage, this makes it easy to run ~eldev test~ or batch ERT
+without editing your init files:
+
+#+begin_src sh
+export LLM_TEST_PROVIDER_ELISP='(progn
+  (load "~/.emacs.d/claude-oauth.el")
+  (make-llm-claude-oauth :chat-model "claude-sonnet-4-6"))'
+eldev test
+#+end_src
+
+If no provider is configured by any of these methods, the registered
+~llm-test~ scenarios fail with a clear error.
+
 * Testing Your Own Package
 
 When testing a package that isn't installed system-wide, pass ~:load-path~ to
@@ -136,6 +153,11 @@ startup code (e.g., requiring packages, configuring variables):
 
 The load-path entries are added and init-forms are evaluated when each test
 Emacs subprocess starts, before any test setup or execution.
+
+The provider is resolved when each test runs, in this order:
+1. the explicit ~:provider~ argument,
+2. ~llm-test-provider~,
+3. ~LLM_TEST_PROVIDER_ELISP~.
 
 * Status
 
