@@ -14,7 +14,7 @@
   "Return the visible contents of the selected window from INFO's frame state."
   (let* ((state (json-parse-string
                  (read (llm-test--eval-in-emacs info
-                                               llm-test--frame-state-elisp))
+                                                llm-test--frame-state-elisp))
                  :object-type 'alist
                  :array-type 'list))
          (windows (alist-get "windows" state nil nil #'string=))
