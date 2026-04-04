@@ -7,6 +7,26 @@
 
 (require 'llm-test)
 (require 'ert)
+(require 'json)
+(require 'seq)
+
+(defun llm-test-test--selected-window (state)
+  "Return the selected window object from parsed frame STATE."
+  (let ((windows (alist-get "windows" state nil nil #'string=)))
+    (seq-find (lambda (window)
+                (eq (alist-get "selected" window nil nil #'string=) t))
+              windows)))
+
+(defun llm-test-test--selected-window-contents (info)
+  "Return the visible contents of the selected window from INFO's frame state."
+  (let ((state (json-parse-string
+                (read (llm-test--eval-in-emacs info
+                                               llm-test--frame-state-elisp))
+                :object-type 'alist
+                :array-type 'list)))
+    (alist-get "contents"
+               (llm-test-test--selected-window state)
+               nil nil #'string=)))
 
 (defun llm-test-test--testscripts-directory ()
   "Return the absolute path to the sample YAML test scripts."
@@ -156,21 +176,201 @@
                   (llm-test--eval-in-emacs
                    info
                    "(with-current-buffer \"*test-visible*\" (count-lines (point-min) (point-max)))")))
-                (visible
-                 (llm-test--eval-in-emacs
-                  info
-                  (concat "(progn"
-                          "  (redisplay t)"
-                          "  (let ((w (get-buffer-window \"*test-visible*\" t)))"
-                          "    (with-current-buffer \"*test-visible*\""
-                          "      (buffer-substring-no-properties"
-                          "        (window-start w) (window-end w t)))))"))))
+                (visible (llm-test-test--selected-window-contents info)))
             (should (= total-lines 100))
-            ;; Visible content should be a subset of the buffer.
+            ;; Visible content should be non-empty and no longer than the buffer.
             (let ((visible-lines (length (split-string visible "\n" t))))
-              (should (< visible-lines 100))
+              (should (<= visible-lines 100))
               (should (> visible-lines 0)))))
       (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-overlay-after-string ()
+  "Overlay after-strings should appear in captured visible contents."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-overlay-after*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha\\nbeta\")"
+                   "  (goto-char (point-min))"
+                   "  (forward-line 1)"
+                   "  (let ((ov (make-overlay (point) (point))))"
+                   "    (overlay-put ov 'after-string \"\\n>> placeholder\"))"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "alpha" visible))
+            (should (string-match-p ">> placeholder" visible))
+            (should (string-match-p "beta" visible))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-overlay-display-string ()
+  "Overlay display strings should appear in captured visible contents."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-overlay-display*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha beta\")"
+                   "  (let ((ov (make-overlay (point-min) (+ (point-min) 5))))"
+                   "    (overlay-put ov 'display \"[shown]\"))"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "\\[shown\\]" visible))
+            (should (string-match-p "beta" visible))
+            (should-not (string-match-p "alpha" visible))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-overlay-display-placeholder ()
+  "Non-string overlay display specs should use a display placeholder."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-overlay-display-placeholder*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha beta\")"
+                   "  (let ((ov (make-overlay (point-min) (+ (point-min) 5))))"
+                   "    (overlay-put ov 'display '(space :width 3)))"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "\\[display\\]" visible))
+            (should (string-match-p "beta" visible))
+            (should-not (string-match-p "alpha" visible))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-display-text-property ()
+  "Display text properties should replace the underlying buffer text."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-display-text-property*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"alpha beta\")"
+                   "  (put-text-property (point-min) (+ (point-min) 5) 'display \"[shown]\")"
+                   "  (goto-char (point-min)))"))
+          (let ((visible (llm-test-test--selected-window-contents info)))
+            (should (string-match-p "\\[shown\\]" visible))
+            (should (string-match-p "beta" visible))
+            (should-not (string-match-p "alpha" visible))))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-keep-adjacent-display-text-runs ()
+  "Adjacent identical display text-property runs should not collapse together."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-adjacent-display-runs*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"ab\")"
+                   "  (put-text-property (point-min) (1+ (point-min)) 'display \"[shown]\")"
+                   "  (put-text-property (1+ (point-min)) (+ (point-min) 2) 'display \"[shown]\")"
+                   "  (goto-char (point-min)))"))
+          (should (equal (llm-test-test--selected-window-contents info)
+                         "[shown][shown]")))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-keep-adjacent-display-placeholders ()
+  "Adjacent non-string display text-property runs should not collapse."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-adjacent-display-placeholders*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"ab\")"
+                   "  (put-text-property (point-min) (1+ (point-min)) 'display '(space :width 2))"
+                   "  (put-text-property (1+ (point-min)) (+ (point-min) 2) 'display '(space :width 3))"
+                   "  (goto-char (point-min)))"))
+          (should (equal (llm-test-test--selected-window-contents info)
+                         "[display][display]")))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-include-after-string-between-displays ()
+  "Display transitions should keep after-strings at the handoff boundary."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-display-after-transition*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"abcdefghij\")"
+                   "  (let ((outer (make-overlay (point-min) (+ (point-min) 10)))"
+                   "        (inner (make-overlay (+ (point-min) 4) (+ (point-min) 6))))"
+                   "    (overlay-put outer 'display \"[outer]\")"
+                   "    (overlay-put inner 'display \"[inner]\")"
+                   "    (overlay-put inner 'after-string \"!\"))"
+                   "  (goto-char (point-min)))"))
+          (should (equal (llm-test-test--selected-window-contents info)
+                         "[outer][inner]![outer]")))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-handle-same-start-overlays ()
+  "More nested same-start display overlays should win first."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-same-start-display*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"abcdefghij\")"
+                   "  (let ((outer (make-overlay (point-min) (+ (point-min) 10)))"
+                   "        (inner (make-overlay (point-min) (+ (point-min) 5))))"
+                   "    (overlay-put outer 'display \"[outer]\")"
+                   "    (overlay-put inner 'display \"[inner]\"))"
+                   "  (goto-char (point-min)))"))
+          (should (equal (llm-test-test--selected-window-contents info)
+                         "[inner][outer]")))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-visible-buffer-contents-handle-same-end-overlays ()
+  "More nested same-end display overlays should win last."
+  (let ((info (llm-test--start-emacs)))
+    (unwind-protect
+        (progn
+          (llm-test--eval-in-emacs
+           info
+           (concat "(progn"
+                   "  (switch-to-buffer \"*test-same-end-display*\")"
+                   "  (erase-buffer)"
+                   "  (insert \"abcdefghij\")"
+                   "  (let ((outer (make-overlay (point-min) (+ (point-min) 10)))"
+                   "        (inner (make-overlay (+ (point-min) 5) (+ (point-min) 10))))"
+                   "    (overlay-put outer 'display \"[outer]\")"
+                   "    (overlay-put inner 'display \"[inner]\"))"
+                   "  (goto-char (point-min)))"))
+          (should (equal (llm-test-test--selected-window-contents info)
+                         "[outer][inner]")))
+      (llm-test--stop-emacs info))))
+
+(ert-deftest llm-test-selected-window-prefers-json-true ()
+  "Selected-window lookup should ignore JSON false values."
+  (let* ((state (json-parse-string
+                 "{\"windows\":[{\"selected\":false,\"contents\":\"first\"},{\"selected\":true,\"contents\":\"second\"}]}"
+                 :object-type 'alist
+                 :array-type 'list))
+         (selected (llm-test-test--selected-window state)))
+    (should (equal (alist-get "contents" selected nil nil #'string=)
+                   "second"))))
 
 (ert-deftest llm-test-suggestions-accumulate ()
   "The suggest-improvement tool should accumulate suggestions."

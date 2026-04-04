@@ -24,7 +24,7 @@ description to the LLM as a chat prompt with a set of tools.  The LLM responds
 with tool calls, which ~llm-test~ executes and returns the results.  This
 continues in an async loop -- each iteration is one LLM request/response round
 trip -- until the agent calls ~pass-test~ or ~fail-test~, or the iteration limit
-(~llm-test-max-iterations~, default 20) is reached.
+(~llm-test-max-iterations~, default 80) is reached.
 
 ** Available Tools
 
