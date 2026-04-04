@@ -237,7 +237,7 @@ does not block the Emacs event loop."
 
 ;;; Agent Tools and Loop
 
-(defcustom llm-test-max-iterations 20
+(defcustom llm-test-max-iterations 80
   "Maximum number of agent iterations before forcing a timeout failure."
   :type 'integer
   :group 'llm-test)
@@ -323,24 +323,31 @@ used to capture frame state after each call.
 FN is an async tool function that takes a callback as its first argument.
 The returned wrapper is also async (takes callback as first arg)."
   (lambda (callback &rest args)
-    (when llm-test-debug
-      (message "llm-test tool %s called with: %S" name args))
-    (apply fn
-           (lambda (raw-result)
-             (when llm-test-debug
-               (message "llm-test tool %s returned: %s" name
-                        (truncate-string-to-width
-                         (format "%S" raw-result) 200)))
-             (futur-bind
-              (llm-test--capture-frame-state-async emacs-info)
-              (lambda (frame-state)
-                (let ((result
-                       (llm-test--truncate-result
-                        (format "%s\n\nFrame state:\n%s"
-                                raw-result frame-state))))
-                  (funcall callback result)
-                  (futur-done nil)))))
-           args)))
+    (let ((start-time (float-time)))
+      (when llm-test-debug
+        (message "llm-test tool %s called with: %S" name args))
+      (apply fn
+             (lambda (raw-result)
+               (when llm-test-debug
+                 (message "llm-test tool %s returned in %.3fs: %s"
+                          name
+                          (- (float-time) start-time)
+                          (truncate-string-to-width
+                           (format "%S" raw-result) 200)))
+               (futur-bind
+                (llm-test--capture-frame-state-async emacs-info)
+                (lambda (frame-state)
+                  (let ((result
+                         (llm-test--truncate-result
+                          (format "%s\n\nFrame state:\n%s"
+                                  raw-result frame-state))))
+                    (when llm-test-debug
+                      (message "llm-test tool %s frame-state captured in %.3fs"
+                               name
+                               (- (float-time) start-time)))
+                    (funcall callback result)
+                    (futur-done nil)))))
+             args))))
 
 (defun llm-test--make-tools (emacs-info suggestions)
   "Create the list of `llm-tool' structs for the test agent.
@@ -490,10 +497,25 @@ Important rules:
 - Use send-keys when the test requires simulating interactive user input.
 - send-keys is non-blocking: the keys may not be processed before the frame \
 state is captured.  Call eval-elisp with \"t\" if you need a fresh snapshot.
+- Do not batch send-keys across UI state transitions such as opening the \
+minibuffer, entering an insertion mode, or waiting for a prompt.  Send a small \
+action, refresh, then respond to what is visible.
 - When the minibuffer is active (visible in the frame state), respond to the \
-prompt by calling send-keys with the input and RET.
+prompt appropriately: for read-string/completing-read style prompts, send the \
+input and RET; for single-key prompts such as y-or-n-p, send just the single \
+key.
+- Trust the commands and keybindings named in the test description and setup. \
+Do not inspect keymaps, run describe-mode/describe-function, or open help \
+buffers unless the test explicitly asks for that or the instructed action has \
+already failed more than once.
+- eval-elisp runs in a neutral evaluation context, not necessarily the selected \
+window's buffer.  Use with-current-buffer when checking buffer-local state.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
+- Be efficient: prefer performing the requested action and checking the result \
+over exploratory introspection.
+- If you seem blocked after one or two reasonable recovery attempts, call \
+fail-test with the blocker instead of continuing to probe indefinitely.
 - Be thorough: verify the actual state, don't assume operations succeeded.
 - If you notice anything about the UI or behavior that could be improved \
 (confusing text, poor layout, missing feedback, awkward workflow), call \
@@ -518,39 +540,45 @@ iteration limit."
                 :reason (format "Agent did not reach a verdict after %d iterations"
                                 llm-test-max-iterations)
                 :suggestions (cdr suggestions)))
-    (when llm-test-debug
-      (message "llm-test iteration %d: calling llm-chat-async" iteration))
-    (llm-chat-async
-     provider prompt
-     (lambda (result)
-       (when llm-test-debug
-         (message "llm-test iteration %d: got response, tool-results=%S"
-                  iteration (and (plistp result)
-                                 (plist-get result :tool-results))))
-       (let* ((tool-results (plist-get result :tool-results))
-              (pass-result (assoc-default "pass-test" tool-results))
-              (fail-result (assoc-default "fail-test" tool-results)))
-         (cond
-          (pass-result
-           (funcall callback
-                    (make-llm-test-result :passed-p t :reason pass-result
-                                          :suggestions (cdr suggestions))))
-          (fail-result
-           (funcall callback
-                    (make-llm-test-result :passed-p nil :reason fail-result
-                                          :suggestions (cdr suggestions))))
-          (t
-           (llm-test--run-test-async provider prompt (1+ iteration)
-                                     suggestions callback)))))
-     (lambda (_ err)
-       (when llm-test-debug
-         (message "llm-test iteration %d: LLM error: %s" iteration err))
-       (funcall callback
-                (make-llm-test-result
-                 :passed-p nil
-                 :reason (format "LLM error: %s" err)
-                 :suggestions (cdr suggestions))))
-     t)))
+    (let ((start-time (float-time)))
+      (when llm-test-debug
+        (message "llm-test iteration %d: calling llm-chat-async" iteration))
+      (llm-chat-async
+       provider prompt
+       (lambda (result)
+         (when llm-test-debug
+           (message "llm-test iteration %d: got response in %.3fs, tool-results=%S"
+                    iteration
+                    (- (float-time) start-time)
+                    (and (plistp result)
+                         (plist-get result :tool-results))))
+         (let* ((tool-results (plist-get result :tool-results))
+                (pass-result (assoc-default "pass-test" tool-results))
+                (fail-result (assoc-default "fail-test" tool-results)))
+           (cond
+            (pass-result
+             (funcall callback
+                      (make-llm-test-result :passed-p t :reason pass-result
+                                            :suggestions (cdr suggestions))))
+            (fail-result
+             (funcall callback
+                      (make-llm-test-result :passed-p nil :reason fail-result
+                                            :suggestions (cdr suggestions))))
+            (t
+             (llm-test--run-test-async provider prompt (1+ iteration)
+                                       suggestions callback)))))
+       (lambda (_ err)
+         (when llm-test-debug
+           (message "llm-test iteration %d: LLM error after %.3fs: %s"
+                    iteration
+                    (- (float-time) start-time)
+                    err))
+         (funcall callback
+                  (make-llm-test-result
+                   :passed-p nil
+                   :reason (format "LLM error: %s" err)
+                   :suggestions (cdr suggestions))))
+       t))))
 
 (defun llm-test--run-test (provider emacs-info group-setup test-spec)
   "Run a single test using PROVIDER against EMACS-INFO.
