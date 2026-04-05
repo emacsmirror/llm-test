@@ -137,13 +137,12 @@ If you don't pass ~:provider~ and don't set ~llm-test-provider~, ~llm-test~
 will look for an environment variable named ~LLM_TEST_PROVIDER_ELISP~.  Its
 value should be trusted elisp that constructs a provider object.
 
-For command-line usage, this makes it easy to run ~eldev test~ or batch ERT
-without editing your init files:
+For command-line usage, this makes it easy to run tests on the command-line
+(using an Emacs build tool such as [[https://github.com/emacs-eldev/eldev][eldev]] or similar tool) or batch ERT without
+editing your init files:
 
 #+begin_src sh
-export LLM_TEST_PROVIDER_ELISP='(progn
-  (load "~/.emacs.d/claude-oauth.el")
-  (make-llm-claude-oauth :chat-model "claude-sonnet-4-6"))'
+export LLM_TEST_PROVIDER_ELISP='(make-llm-claude-oauth :chat-model "claude-sonnet-4-6" :key (getenv "ANTHROPIC_API_KEY"))'
 eldev test
 #+end_src
 
