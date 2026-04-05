@@ -1,3 +1,5 @@
+* 0.2.1
+- Tweak instructions to stop the test from trying to mock things that aren't working.
 * 0.2.0
 - Added =require= for all common providers so users don't need to specifically require them.
 - Fix bug in registering ert tests in use of ~:extra-load-path~.

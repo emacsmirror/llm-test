@@ -674,6 +674,8 @@ already failed more than once.
 window's buffer.  Use with-current-buffer when checking buffer-local state.
 - If an operation returns an error, try to understand why and report it \
 via fail-test.
+- Never try to mock or simulating anything that isn't working.  If you get a \
+failure, let it fail without trying to work around it.
 - Be efficient: prefer performing the requested action and checking the result \
 over exploratory introspection.
 - If you seem blocked after one or two reasonable recovery attempts, call \
