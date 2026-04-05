@@ -2,4 +2,5 @@
 - Added =require= for all common providers so users don't need to specifically require them.
 - Fix bug in registering ert tests in use of ~:extra-load-path~.
 - Suppress non-free warnings in tests.
+- Fix failure to fail with some llm providers.
 - Add ability to test for expected failures (mostly for testing =llm-test= itself).

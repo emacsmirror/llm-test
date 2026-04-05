@@ -716,8 +716,10 @@ iteration limit."
                     (and (plistp result)
                          (plist-get result :tool-results))))
          (let* ((tool-results (plist-get result :tool-results))
-                (pass-result (assoc-default "pass-test" tool-results))
-                (fail-result (assoc-default "fail-test" tool-results)))
+                ;; TODO: The tool identifier may come back as strings or symbols.  The
+                ;; underlying cause of this needs to be fixed.
+                (pass-result (or (assoc-default "pass-test" tool-results) (assoc-default 'pass-test tool-results)))
+                (fail-result (or (assoc-default "fail-test" tool-results) (assoc-default 'fail-test tool-results))))
            (cond
             (pass-result
              (funcall callback
