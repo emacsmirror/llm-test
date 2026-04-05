@@ -1,0 +1,9 @@
+group: expected failures
+setup: |
+  Enable auto-fill-mode in a text-mode buffer.
+  Set fill-column to 40.
+tests:
+  - description: |
+      Type a long paragraph that exceeds fill-column.
+      Verify that the text is automatically wrapped at exactly column 10.
+    expected-failure: true

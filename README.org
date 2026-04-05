@@ -83,6 +83,15 @@ position, variable values, overlays, text properties, etc.
 
 * YAML Test Format
 
+The YAML format consists of a single group with a shared setup and a list of tests.
+
+Each test is a natural language description of the test to run. The test
+description should include the expected results.
+
+If a test is expected to fail, the ~expected-failure~ key can be set to ~true~.
+This is useful for regression testing against known issues or for testing
+the test framework itself.
+
 #+begin_src yaml
 group: auto-fill mode
 setup: |
@@ -95,6 +104,9 @@ tests:
   - description: |
       Type a numbered list item that exceeds fill-column.
       Verify that continuation lines are indented properly.
+  - description: |
+      Type text and verify a result that should NOT happen.
+    expected-failure: true
 #+end_src
 
 * Installation

@@ -130,7 +130,7 @@ Explicit PROVIDER takes precedence."
 
 (cl-defstruct llm-test-spec
   "A single test specification."
-  description)
+  description expected-failure)
 
 (cl-defstruct llm-test-group
   "A group of tests with shared setup."
@@ -144,14 +144,16 @@ The YAML should contain a single group document with keys:
   group: <name>
   setup: <natural language setup description>
   tests:
-    - description: <test description>"
+    - description: <test description>
+      expected-failure: <boolean>"
   (let* ((parsed (yaml-parse-string yaml-string))
          (group-name (gethash 'group parsed))
          (setup (gethash 'setup parsed))
          (tests-array (gethash 'tests parsed))
          (tests (mapcar (lambda (test-hash)
                           (make-llm-test-spec
-                           :description (gethash 'description test-hash)))
+                           :description (gethash 'description test-hash)
+                           :expected-failure (gethash 'expected-failure test-hash)))
                         (append tests-array nil))))
     (unless group-name
       (error "YAML test spec missing required 'group' key"))
@@ -820,6 +822,7 @@ INIT-FORMS is a list of elisp forms to evaluate in the subprocess at startup."
                        test-name
                        (make-ert-test
                         :name test-name
+                        :expected-result-type (if (llm-test-spec-expected-failure the-test) :failed :passed)
                         :documentation (format "LLM test: %s (test %d)\n%s"
                                                (llm-test-group-name group)
                                                idx description)

@@ -117,9 +117,16 @@
   "Loading a directory should find all YAML files."
   (let ((groups (llm-test-load-directory
                  (llm-test-test--testscripts-directory))))
-    (should (= (length groups) 4))))
+    (should (= (length groups) 5))))
 
 ;;; Slugify tests
+
+(ert-deftest llm-test-parse-expected-failure ()
+  "Parsing YAML with expected-failure should work."
+  (let ((groups (llm-test--parse-yaml-string
+                 "group: test\ntests:\n  - description: fail\n    expected-failure: true\n  - description: pass\n")))
+    (should (llm-test-spec-expected-failure (nth 0 (llm-test-group-tests groups))))
+    (should-not (llm-test-spec-expected-failure (nth 1 (llm-test-group-tests groups))))))
 
 (ert-deftest llm-test-slugify ()
   "Slugify should produce clean symbol names."
