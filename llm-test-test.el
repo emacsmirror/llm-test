@@ -136,7 +136,8 @@
                (lambda (format-string &rest args)
                  (push (apply #'format format-string args) messages))))
       (llm-test--log "hello %s" "world")
-      (should (member "llm-test: hello world" messages)))))
+      (should (cl-some (lambda (m) (string-match-p "llm-test: \\[\\+[0-9.]+s\\] hello world" m))
+                       messages)))))
 
 (ert-deftest llm-test-log-to-file ()
   "Logging with llm-test--current-debug-file should write to file."

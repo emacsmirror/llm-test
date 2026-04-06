@@ -531,7 +531,7 @@ conversation context and causing API timeouts."
   "Elisp expression that captures the full frame state as a JSON string.
 Returns a JSON object with `windows' (array of window objects each
 having buffer, mode, selected, point, lines) and `minibuffer'
-(object with active, and optionally prompt and input).")
+\(object with active, and optionally prompt and input).")
 
 (defun llm-test--capture-frame-state-async (emacs-info)
   "Capture the current frame state of the test Emacs as a JSON string.
