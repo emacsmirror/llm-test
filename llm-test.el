@@ -183,187 +183,6 @@ The YAML should contain a single group document with keys:
 (defvar llm-test--server-name-counter 0
   "Counter for generating unique server names.")
 
-(cl-defun llm-test--start-emacs (&key extra-load-path init-forms)
-  "Start a fresh Emacs process for testing.
-EXTRA-LOAD-PATH is a list of directories to add to the subprocess
-`load-path'.
-
-INIT-FORMS is a list of elisp forms to evaluate at startup.  Returns a
-plist with :process, :server-name, :socket-dir, and :init-file."
-  (let* ((server-name (format "llm-test-%d-%d"
-                              (emacs-pid)
-                              (cl-incf llm-test--server-name-counter)))
-         (socket-dir (make-temp-file "llm-test-socket-" t))
-         (init-file (make-temp-file "llm-test-init-" nil ".el"))
-         (_ (with-temp-file init-file
-              (insert (format "(setq server-socket-dir %S server-name %S)\n"
-                              socket-dir server-name))
-              ;; Disable native compilation to avoid noise in tests.
-              (insert "(setq native-comp-deferred-compilation nil)\n")
-              (insert llm-test--frame-state-helper-elisp "\n")
-              (dolist (dir extra-load-path)
-                (insert (format "(add-to-list 'load-path %S)\n" dir)))
-              (dolist (form init-forms)
-                (insert (format "%S\n" form)))))
-         (process (start-process
-                   (format "llm-test-emacs-%s" server-name)
-                   (format " *llm-test-emacs-%s*" server-name)
-                   llm-test-emacs-executable
-                   "-Q"
-                   "-l" init-file
-                   (format "--daemon=%s" server-name))))
-    ;; Wait for the daemon to be ready by polling for the socket file.
-    (let ((deadline (+ (float-time) llm-test-timeout))
-          (socket-file (expand-file-name server-name socket-dir)))
-      (while (and (< (float-time) deadline)
-                  (not (file-exists-p socket-file)))
-        (sit-for 0.1))
-      (unless (file-exists-p socket-file)
-        (when (process-live-p process)
-          (kill-process process))
-        (error "Timed out waiting for test Emacs daemon to start")))
-    ;; Set the frame dimensions so that window-based visibility queries
-    ;; return meaningful results in the daemon.
-    (let ((frame-info (list :process process
-                            :server-name server-name
-                            :socket-dir socket-dir
-                            :init-file init-file)))
-      (llm-test--eval-in-emacs
-       frame-info
-       (format "(set-frame-size (selected-frame) %d %d)"
-               llm-test-frame-width llm-test-frame-height))
-      frame-info)))
-
-(defun llm-test--eval-in-emacs (emacs-info sexp)
-  "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
-SEXP should be a string of elisp to evaluate.
-Returns the result as a string.  Times out after `llm-test-timeout' seconds.
-Uses `call-process' to avoid processing other async events (like LLM
-API responses) while waiting, which would cause re-entrant callbacks."
-  (let* ((server-name (plist-get emacs-info :server-name))
-         (socket-dir (plist-get emacs-info :socket-dir)))
-    (with-temp-buffer
-      (let ((exit-code
-             (call-process "emacsclient" nil t nil
-                           (format "--socket-name=%s"
-                                   (expand-file-name server-name socket-dir))
-                           "--eval" sexp)))
-        (if (= exit-code 0)
-            (string-trim (buffer-string))
-          (error "Emacsclient eval failed (exit %d): %s"
-                 exit-code (buffer-string)))))))
-
-(defun llm-test--eval-in-emacs-async (emacs-info sexp)
-  "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
-SEXP should be a string of elisp to evaluate.
-Returns a `futur' that resolves to the result string, or signals an
-error if emacsclient fails.  Unlike `llm-test--eval-in-emacs', this
-does not block the Emacs event loop."
-  (let* ((server-name (plist-get emacs-info :server-name))
-         (socket-dir (plist-get emacs-info :socket-dir))
-         (buf (generate-new-buffer " *llm-test-eval*" t)))
-    (futur-let*
-        ((exit-code <- (futur-process-call
-                        "emacsclient" nil buf nil
-                        (format "--socket-name=%s"
-                                (expand-file-name server-name socket-dir))
-                        "--eval" sexp))
-         (output (with-current-buffer buf
-                   (prog1 (string-trim (buffer-string))
-                     (kill-buffer buf)))))
-      (if (= exit-code 0)
-          (futur-done output)
-        (futur-failed
-         (list 'error
-               (format "Emacsclient eval failed (exit %d): %s"
-                       exit-code output)))))))
-
-(defun llm-test--stop-emacs (emacs-info)
-  "Stop the test Emacs process described by EMACS-INFO."
-  (let* ((server-name (plist-get emacs-info :server-name))
-         (socket-dir (plist-get emacs-info :socket-dir))
-         (init-file (plist-get emacs-info :init-file))
-         (process (plist-get emacs-info :process)))
-    (ignore-errors
-      (call-process "emacsclient" nil nil nil
-                    (format "--socket-name=%s"
-                            (expand-file-name server-name socket-dir))
-                    "--eval" "(kill-emacs)"))
-    (when (process-live-p process)
-      (delete-process process))
-    (ignore-errors
-      (delete-directory socket-dir t))
-    (when init-file
-      (ignore-errors
-        (delete-file init-file)))))
-
-;;; Agent Tools and Loop
-
-(defcustom llm-test-max-iterations 100
-  "Maximum number of agent iterations before forcing a timeout failure."
-  :type 'integer
-  :group 'llm-test)
-
-(defcustom llm-test-debug nil
-  "When non-nil, log each tool call and its result.
-If set to t, logs to *Messages*.
-If set to 'file, logs to a temporary file and prints its location.
-If nil, check `llm-test-debug-environment-variable'."
-  :type '(choice (const :tag "Off" nil)
-                 (const :tag "Messages" t)
-                 (const :tag "Temporary file" file))
-  :group 'llm-test)
-
-(defcustom llm-test-debug-environment-variable "LLM_TEST_DEBUG"
-  "Environment variable to check for debug mode when `llm-test-debug` is nil.
-If the variable is set to \"file\", logs to a temporary file.
-If set to any other non-empty value, logs to *Messages*."
-  :type 'string
-  :group 'llm-test)
-
-(defun llm-test--resolve-debug ()
-  "Resolve the debug mode from `llm-test-debug` or the environment."
-  (or llm-test-debug
-      (let ((env-val (getenv llm-test-debug-environment-variable)))
-        (cond
-         ((null env-val) nil)
-         ((string= env-val "file") 'file)
-         ((not (string= env-val "")) t)
-         (t nil)))))
-
-
-(defvar llm-test--current-debug-file nil
-  "The file where debug logs are currently being written.")
-
-(defvar llm-test--start-time nil
-  "The `float-time' when the current test started, for elapsed timestamps.")
-
-(defun llm-test--log (format-string &rest args)
-  "Log FORMAT-STRING with ARGS, based on `llm-test-debug' or environment.
-Each line is prefixed with the elapsed time since `llm-test--start-time'."
-  (let* ((debug (llm-test--resolve-debug))
-         (elapsed (if llm-test--start-time
-                      (- (float-time) llm-test--start-time)
-                    0.0))
-         (raw (apply #'format format-string args))
-         (prefix (format "[+%.1fs] " elapsed))
-         (msg (concat prefix raw)))
-    (when debug
-      (message "llm-test: %s" msg))
-    (when llm-test--current-debug-file
-      (with-temp-buffer
-        (insert msg)
-        (newline)
-        (append-to-file (point-min) (point-max) llm-test--current-debug-file)))))
-
-(defcustom llm-test-max-tool-result-length 2000
-  "Maximum character length for a tool result returned to the LLM.
-Results longer than this are truncated with a notice.  This prevents
-large return values (e.g. struct representations) from bloating the
-conversation context and causing API timeouts."
-  :type 'integer
-  :group 'llm-test)
-
 (defconst llm-test--frame-state-helper-elisp
   "(require 'cl-lib)
 (require 'json)
@@ -532,6 +351,187 @@ conversation context and causing API timeouts."
 Returns a JSON object with `windows' (array of window objects each
 having buffer, mode, selected, point, lines) and `minibuffer'
 \(object with active, and optionally prompt and input).")
+(cl-defun llm-test--start-emacs (&key extra-load-path init-forms)
+  "Start a fresh Emacs process for testing.
+EXTRA-LOAD-PATH is a list of directories to add to the subprocess
+`load-path'.
+
+INIT-FORMS is a list of elisp forms to evaluate at startup.  Returns a
+plist with :process, :server-name, :socket-dir, and :init-file."
+  (let* ((server-name (format "llm-test-%d-%d"
+                              (emacs-pid)
+                              (cl-incf llm-test--server-name-counter)))
+         (socket-dir (make-temp-file "llm-test-socket-" t))
+         (init-file (make-temp-file "llm-test-init-" nil ".el"))
+         (_ (with-temp-file init-file
+              (insert (format "(setq server-socket-dir %S server-name %S)\n"
+                              socket-dir server-name))
+              ;; Disable native compilation to avoid noise in tests.
+              (insert "(setq native-comp-deferred-compilation nil)\n")
+              (insert llm-test--frame-state-helper-elisp "\n")
+              (dolist (dir extra-load-path)
+                (insert (format "(add-to-list 'load-path %S)\n" dir)))
+              (dolist (form init-forms)
+                (insert (format "%S\n" form)))))
+         (process (start-process
+                   (format "llm-test-emacs-%s" server-name)
+                   (format " *llm-test-emacs-%s*" server-name)
+                   llm-test-emacs-executable
+                   "-Q"
+                   "-l" init-file
+                   (format "--daemon=%s" server-name))))
+    ;; Wait for the daemon to be ready by polling for the socket file.
+    (let ((deadline (+ (float-time) llm-test-timeout))
+          (socket-file (expand-file-name server-name socket-dir)))
+      (while (and (< (float-time) deadline)
+                  (not (file-exists-p socket-file)))
+        (sit-for 0.1))
+      (unless (file-exists-p socket-file)
+        (when (process-live-p process)
+          (kill-process process))
+        (error "Timed out waiting for test Emacs daemon to start")))
+    ;; Set the frame dimensions so that window-based visibility queries
+    ;; return meaningful results in the daemon.
+    (let ((frame-info (list :process process
+                            :server-name server-name
+                            :socket-dir socket-dir
+                            :init-file init-file)))
+      (llm-test--eval-in-emacs
+       frame-info
+       (format "(set-frame-size (selected-frame) %d %d)"
+               llm-test-frame-width llm-test-frame-height))
+      frame-info)))
+
+(defun llm-test--eval-in-emacs (emacs-info sexp)
+  "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
+SEXP should be a string of elisp to evaluate.
+Returns the result as a string.  Times out after `llm-test-timeout' seconds.
+Uses `call-process' to avoid processing other async events (like LLM
+API responses) while waiting, which would cause re-entrant callbacks."
+  (let* ((server-name (plist-get emacs-info :server-name))
+         (socket-dir (plist-get emacs-info :socket-dir)))
+    (with-temp-buffer
+      (let ((exit-code
+             (call-process "emacsclient" nil t nil
+                           (format "--socket-name=%s"
+                                   (expand-file-name server-name socket-dir))
+                           "--eval" sexp)))
+        (if (= exit-code 0)
+            (string-trim (buffer-string))
+          (error "Emacsclient eval failed (exit %d): %s"
+                 exit-code (buffer-string)))))))
+
+(defun llm-test--eval-in-emacs-async (emacs-info sexp)
+  "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
+SEXP should be a string of elisp to evaluate.
+Returns a `futur' that resolves to the result string, or signals an
+error if emacsclient fails.  Unlike `llm-test--eval-in-emacs', this
+does not block the Emacs event loop."
+  (let* ((server-name (plist-get emacs-info :server-name))
+         (socket-dir (plist-get emacs-info :socket-dir))
+         (buf (generate-new-buffer " *llm-test-eval*" t)))
+    (futur-let*
+        ((exit-code <- (futur-process-call
+                        "emacsclient" nil buf nil
+                        (format "--socket-name=%s"
+                                (expand-file-name server-name socket-dir))
+                        "--eval" sexp))
+         (output (with-current-buffer buf
+                   (prog1 (string-trim (buffer-string))
+                     (kill-buffer buf)))))
+      (if (= exit-code 0)
+          (futur-done output)
+        (futur-failed
+         (list 'error
+               (format "Emacsclient eval failed (exit %d): %s"
+                       exit-code output)))))))
+
+(defun llm-test--stop-emacs (emacs-info)
+  "Stop the test Emacs process described by EMACS-INFO."
+  (let* ((server-name (plist-get emacs-info :server-name))
+         (socket-dir (plist-get emacs-info :socket-dir))
+         (init-file (plist-get emacs-info :init-file))
+         (process (plist-get emacs-info :process)))
+    (ignore-errors
+      (call-process "emacsclient" nil nil nil
+                    (format "--socket-name=%s"
+                            (expand-file-name server-name socket-dir))
+                    "--eval" "(kill-emacs)"))
+    (when (process-live-p process)
+      (delete-process process))
+    (ignore-errors
+      (delete-directory socket-dir t))
+    (when init-file
+      (ignore-errors
+        (delete-file init-file)))))
+
+;;; Agent Tools and Loop
+
+(defcustom llm-test-max-iterations 100
+  "Maximum number of agent iterations before forcing a timeout failure."
+  :type 'integer
+  :group 'llm-test)
+
+(defcustom llm-test-debug nil
+  "When non-nil, log each tool call and its result.
+If set to t, logs to *Messages*.
+If set to \\='file, logs to a temporary file and prints its location.
+If nil, check `llm-test-debug-environment-variable'."
+  :type '(choice (const :tag "Off" nil)
+                 (const :tag "Messages" t)
+                 (const :tag "Temporary file" file))
+  :group 'llm-test)
+
+(defcustom llm-test-debug-environment-variable "LLM_TEST_DEBUG"
+  "Environment variable to check for debug mode when `llm-test-debug` is nil.
+If the variable is set to \"file\", logs to a temporary file.
+If set to any other non-empty value, logs to *Messages*."
+  :type 'string
+  :group 'llm-test)
+
+(defun llm-test--resolve-debug ()
+  "Resolve the debug mode from `llm-test-debug` or the environment."
+  (or llm-test-debug
+      (let ((env-val (getenv llm-test-debug-environment-variable)))
+        (cond
+         ((null env-val) nil)
+         ((string= env-val "file") 'file)
+         ((not (string= env-val "")) t)
+         (t nil)))))
+
+
+(defvar llm-test--current-debug-file nil
+  "The file where debug logs are currently being written.")
+
+(defvar llm-test--start-time nil
+  "The `float-time' when the current test started, for elapsed timestamps.")
+
+(defun llm-test--log (format-string &rest args)
+  "Log FORMAT-STRING with ARGS, based on `llm-test-debug' or environment.
+Each line is prefixed with the elapsed time since `llm-test--start-time'."
+  (let* ((debug (llm-test--resolve-debug))
+         (elapsed (if llm-test--start-time
+                      (- (float-time) llm-test--start-time)
+                    0.0))
+         (raw (apply #'format format-string args))
+         (prefix (format "[+%.1fs] " elapsed))
+         (msg (concat prefix raw)))
+    (when debug
+      (message "llm-test: %s" msg))
+    (when llm-test--current-debug-file
+      (with-temp-buffer
+        (insert msg)
+        (newline)
+        (append-to-file (point-min) (point-max) llm-test--current-debug-file)))))
+
+(defcustom llm-test-max-tool-result-length 2000
+  "Maximum character length for a tool result returned to the LLM.
+Results longer than this are truncated with a notice.  This prevents
+large return values (e.g. struct representations) from bloating the
+conversation context and causing API timeouts."
+  :type 'integer
+  :group 'llm-test)
+
 
 (defun llm-test--capture-frame-state-async (emacs-info)
   "Capture the current frame state of the test Emacs as a JSON string.
