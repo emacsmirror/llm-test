@@ -181,6 +181,175 @@ The YAML should contain a single group document with keys:
 (defvar llm-test--server-name-counter 0
   "Counter for generating unique server names.")
 
+(defconst llm-test--frame-state-helper-elisp
+  "(require 'cl-lib)
+(require 'json)
+
+(defun llm-test--plain-string (value)
+  (cond
+   ((stringp value) (substring-no-properties value))
+   ((and (consp value) (stringp (car value)))
+    (substring-no-properties (car value)))
+   (t nil)))
+
+(defun llm-test--display-replacement (value)
+  (cond
+   ((null value) nil)
+   ((llm-test--plain-string value))
+   (t \"[display]\")))
+
+(defun llm-test--add-event (table pos string)
+  (when (and string pos)
+    (puthash pos (append (gethash pos table) (list string)) table)))
+
+(defun llm-test--append-events (table pos pieces)
+  (dolist (string (gethash pos table))
+    (push string pieces))
+  pieces)
+
+(defun llm-test--display-state-at (pos end)
+  (let* ((display-data (get-char-property-and-overlay pos 'display))
+         (overlay (cdr display-data))
+         (display (llm-test--display-replacement
+                   (car display-data)))
+         (display-end
+          (if overlay
+              (overlay-end overlay)
+            (next-single-char-property-change
+             pos 'display nil end))))
+    (when display
+      (list display overlay display-end))))
+
+(defun llm-test--next-boundary (pos end)
+  (min end
+       (next-overlay-change pos)
+       (next-single-char-property-change pos 'display nil end)))
+
+(defun llm-test--next-display-change (pos end active-state)
+  (let ((next (llm-test--next-boundary pos end)))
+    (while (and (< next end)
+                (equal (llm-test--display-state-at next end)
+                       active-state))
+      (setq next (llm-test--next-boundary next end)))
+    next))
+
+(defun llm-test--window-contents-range (w start-pos end-pos)
+  (with-current-buffer (window-buffer w)
+    (let* ((overlays (cl-remove-duplicates
+                      (append (overlays-in start-pos end-pos)
+                              (overlays-at start-pos)
+                              (overlays-at end-pos))
+                      :test #'eq))
+           (before-table (make-hash-table :test #'eql))
+           (after-table (make-hash-table :test #'eql))
+           (pieces nil)
+           (pos start-pos))
+      (dolist (ov overlays)
+        (let* ((ov-start (overlay-start ov))
+               (ov-end (overlay-end ov))
+               (before
+                (llm-test--plain-string
+                 (overlay-get ov 'before-string)))
+               (after
+                (llm-test--plain-string
+                 (overlay-get ov 'after-string)))
+               (display
+                (llm-test--display-replacement
+                 (overlay-get ov 'display))))
+          (when (and before ov-start
+                     (<= start-pos ov-start) (<= ov-start end-pos))
+            (llm-test--add-event before-table ov-start before))
+          (when (and display ov-start ov-end (= ov-start ov-end)
+                     (<= start-pos ov-start) (<= ov-start end-pos))
+            (llm-test--add-event before-table ov-start display))
+          (when (and after ov-end
+                     (<= start-pos ov-end) (<= ov-end end-pos))
+            (llm-test--add-event
+             (if (and ov-start (= ov-start ov-end))
+                 before-table
+               after-table)
+             ov-end
+             after))))
+      (while (< pos end-pos)
+        (setq pieces
+              (llm-test--append-events before-table pos pieces))
+        (let ((display-state
+               (llm-test--display-state-at pos end-pos)))
+          (if display-state
+              (let* ((display (car display-state))
+                     (next-pos
+                      (llm-test--next-display-change
+                       pos end-pos display-state)))
+                (push display pieces)
+                (setq pos next-pos)
+                (setq pieces
+                      (llm-test--append-events
+                       after-table pos pieces)))
+            (let ((next-pos
+                   (llm-test--next-boundary pos end-pos)))
+              (push (buffer-substring-no-properties pos next-pos)
+                    pieces)
+              (setq pos next-pos)
+              (setq pieces
+                    (llm-test--append-events
+                     after-table pos pieces))))))
+      (setq pieces
+            (llm-test--append-events before-table pos pieces))
+      (apply #'concat (nreverse pieces)))))
+
+(defun llm-test--window-lines (w)
+  (with-current-buffer (window-buffer w)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let* ((start (window-start w))
+               (end (window-end w t))
+               (lines nil))
+          (goto-char start)
+          (while (< (point) end)
+            (let ((line-start (point)))
+              (vertical-motion 1 w)
+              (let ((line-end (point)))
+                (if (<= line-end line-start)
+                    (goto-char end) ; avoid infinite loop
+                  (push (llm-test--window-contents-range w line-start line-end)
+                        lines)))))
+          (nreverse lines))))))
+
+(defun llm-test--capture-frame-state ()
+  (redisplay t)
+  (let* ((wins (window-list nil 'no-minibuf))
+         (windows (make-vector 0 nil)))
+    (dolist (w wins)
+      (let* ((buf (window-buffer w))
+             (name (buffer-name buf)))
+        (unless (string= name \"*Warnings*\")
+          (setq windows
+                (vconcat windows
+                         (list
+                          (list :buffer name
+                                :mode (with-current-buffer buf (symbol-name major-mode))
+                                :selected (eq w (selected-window))
+                                :point (with-current-buffer buf (point))
+                                :lines (apply #'vector (llm-test--window-lines w)))))))))
+    (let ((mini-win (active-minibuffer-window)))
+      (json-encode
+       (list :windows windows
+             :minibuffer (if mini-win
+                             (with-current-buffer (window-buffer mini-win)
+                               (list :active t
+                                     :prompt (or (minibuffer-prompt) \"\")
+                                     :input (minibuffer-contents-no-properties)))
+                           (list :active nil)))))))"
+  "Elisp code to be loaded in the test Emacs to support frame state capture.")
+
+(defconst llm-test--frame-state-elisp
+  "(llm-test--capture-frame-state)"
+  "Elisp expression that captures the full frame state as a JSON string.
+Returns a JSON object with `windows' (array of window objects each
+having buffer, mode, selected, point, lines) and `minibuffer'
+\(object with active, and optionally prompt and input).")
+
 (cl-defun llm-test--start-emacs (&key extra-load-path init-forms)
   "Start a fresh Emacs process for testing.
 EXTRA-LOAD-PATH is a list of directories to add to the subprocess
@@ -196,6 +365,9 @@ plist with :process, :server-name, :socket-dir, and :init-file."
          (_ (with-temp-file init-file
               (insert (format "(setq server-socket-dir %S server-name %S)\n"
                               socket-dir server-name))
+              ;; Disable native compilation to avoid noise in tests.
+              (insert "(setq native-comp-deferred-compilation nil)\n")
+              (insert llm-test--frame-state-helper-elisp "\n")
               (dolist (dir extra-load-path)
                 (insert (format "(add-to-list 'load-path %S)\n" dir)))
               (dolist (form init-forms)
@@ -312,161 +484,14 @@ conversation context and causing API timeouts."
   :type 'integer
   :group 'llm-test)
 
-(defconst llm-test--frame-state-elisp
-  "(progn
-     (require 'cl-lib)
-     (require 'json)
-     (redisplay t)
-     (cl-labels
-         ((llm-test--plain-string (value)
-            (cond
-             ((stringp value) (substring-no-properties value))
-             ((and (consp value) (stringp (car value)))
-              (substring-no-properties (car value)))
-             (t nil)))
-          (llm-test--display-replacement (value)
-            (cond
-             ((null value) nil)
-             ((llm-test--plain-string value))
-             (t \"[display]\")))
-          (llm-test--add-event (table pos string)
-            (when (and string pos)
-              (puthash pos (append (gethash pos table) (list string)) table)))
-          (llm-test--append-events (table pos pieces)
-            (dolist (string (gethash pos table))
-              (push string pieces))
-            pieces)
-          (llm-test--display-state-at (pos end)
-            (let* ((display-data (get-char-property-and-overlay pos 'display))
-                   (overlay (cdr display-data))
-                   (display (llm-test--display-replacement
-                             (car display-data)))
-                   (display-end
-                    (if overlay
-                        (overlay-end overlay)
-                      (next-single-char-property-change
-                       pos 'display nil end))))
-              (when display
-                (list display overlay display-end))))
-          (llm-test--next-boundary (pos end)
-            (min end
-                 (next-overlay-change pos)
-                 (next-single-char-property-change pos 'display nil end)))
-          (llm-test--next-display-change (pos end active-state)
-            (let ((next (llm-test--next-boundary pos end)))
-              (while (and (< next end)
-                          (equal (llm-test--display-state-at next end)
-                                 active-state))
-                (setq next (llm-test--next-boundary next end)))
-              next))
-          (llm-test--window-contents (w)
-            (with-current-buffer (window-buffer w)
-              (let* ((start (window-start w))
-                     (end (window-end w t))
-                     (overlays (cl-remove-duplicates
-                                (append (overlays-in start end)
-                                        (overlays-at start)
-                                        (overlays-at end))
-                                :test #'eq))
-                     (before-table (make-hash-table :test #'eql))
-                     (after-table (make-hash-table :test #'eql))
-                     (pieces nil)
-                     (pos start))
-                (dolist (ov overlays)
-                  (let* ((ov-start (overlay-start ov))
-                         (ov-end (overlay-end ov))
-                         (before
-                          (llm-test--plain-string
-                           (overlay-get ov 'before-string)))
-                         (after
-                          (llm-test--plain-string
-                           (overlay-get ov 'after-string)))
-                         (display
-                          (llm-test--display-replacement
-                           (overlay-get ov 'display))))
-                    (when (and before ov-start
-                               (<= start ov-start) (<= ov-start end))
-                      (llm-test--add-event before-table ov-start before))
-                    (when (and display ov-start ov-end (= ov-start ov-end)
-                               (<= start ov-start) (<= ov-start end))
-                      (llm-test--add-event before-table ov-start display))
-                    (when (and after ov-end
-                               (<= start ov-end) (<= ov-end end))
-                      (llm-test--add-event
-                       (if (and ov-start (= ov-start ov-end))
-                           before-table
-                         after-table)
-                       ov-end
-                       after))))
-                (while (< pos end)
-                  (setq pieces
-                        (llm-test--append-events before-table pos pieces))
-                  (let ((display-state
-                         (llm-test--display-state-at pos end)))
-                    (if display-state
-                        (let* ((display (car display-state))
-                               (next-pos
-                                (llm-test--next-display-change
-                                 pos end display-state)))
-                          (push display pieces)
-                          (setq pos next-pos)
-                          (setq pieces
-                                (llm-test--append-events
-                                 after-table pos pieces)))
-                      (let ((next-pos
-                             (llm-test--next-boundary pos end)))
-                        (push (buffer-substring-no-properties pos next-pos)
-                              pieces)
-                        (setq pos next-pos)
-                        (setq pieces
-                              (llm-test--append-events
-                               after-table pos pieces))))))
-                (setq pieces
-                      (llm-test--append-events before-table pos pieces))
-                (apply #'concat (nreverse pieces))))))
-       (let* ((wins (window-list nil 'no-minibuf))
-              (parts nil))
-         (dolist (w wins)
-           (let* ((buf (window-buffer w))
-                  (name (buffer-name buf))
-                  (sel (eq w (selected-window)))
-                  (contents (llm-test--window-contents w))
-                  (mode (with-current-buffer buf
-                          (symbol-name major-mode)))
-                  (pt (with-current-buffer buf
-                        (point))))
-             (push (format
-                    \"{\\\"buffer\\\": %s, \\\"mode\\\": %s, \\\"selected\\\": %s, \\\"point\\\": %d, \\\"contents\\\": %s}\"
-                    (json-encode-string name)
-                    (json-encode-string mode)
-                    (if sel \"true\" \"false\")
-                    pt
-                    (json-encode-string contents))
-                   parts)))
-         (let ((mini (if (active-minibuffer-window)
-                         (with-current-buffer
-                             (window-buffer (active-minibuffer-window))
-                           (format
-                            \"{\\\"active\\\": true, \\\"prompt\\\": %s, \\\"input\\\": %s}\"
-                            (json-encode-string (or (minibuffer-prompt) \"\"))
-                            (json-encode-string
-                             (minibuffer-contents-no-properties))))
-                       \"{\\\"active\\\": false}\")))
-           (format \"{\\\"windows\\\": [%s], \\\"minibuffer\\\": %s}\"
-                   (mapconcat #'identity (nreverse parts) \", \")
-                   mini)))))"
-  "Elisp expression that captures the full frame state as a JSON string.
-Returns a JSON object with `windows' (array of window objects each
-having buffer, mode, selected, point, contents) and `minibuffer'
-\(object with active, and optionally prompt and input).")
-
 (defun llm-test--capture-frame-state-async (emacs-info)
   "Capture the current frame state of the test Emacs as a JSON string.
 EMACS-INFO is the plist from `llm-test--start-emacs'.
 Returns a futur that resolves to the JSON string."
   (futur-bind
    (llm-test--eval-in-emacs-async emacs-info llm-test--frame-state-elisp)
-   #'futur-done
+   (lambda (result)
+     (futur-done (condition-case nil (read result) (error result))))
    (lambda (err)
      (futur-done (format "{\"error\": \"%s\"}" err)))))
 
@@ -631,7 +656,7 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
       \"mode\": \"<major mode>\",
       \"selected\": true/false,
       \"point\": <integer>,
-      \"contents\": \"<visible text in window>\"
+      \"lines\": [\"<visual line 1>\", \"<visual line 2>\", ...]
     }
   ],
   \"minibuffer\": {
@@ -641,9 +666,13 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
   }
 }
 
-The window contents show only what is visible on screen (like a human looking \
-at the Emacs frame), not the full buffer.  Use send-keys to scroll (e.g. \
-\"C-v\" / \"M-v\") and then call any tool to get an updated frame state.
+The window \"lines\" field is an array of strings, each representing a single \
+visual line on the screen.  If a long line of text is wrapped by Emacs \
+(e.g. via visual-line-mode or auto-fill-mode), it will appear as multiple \
+entries in the \"lines\" array.  This represents exactly what a human \
+looking at the Emacs frame would see, not the full buffer.  Use send-keys \
+to scroll (e.g. \"C-v\" / \"M-v\") and then call any tool to get an updated \
+frame state.
 
 Your workflow:
 1. Read the setup instructions and execute them using eval-elisp or send-keys.

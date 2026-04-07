@@ -18,15 +18,19 @@
               windows)))
 
 (defun llm-test-test--selected-window-contents (info)
-  "Return the visible contents of the selected window from INFO's frame state."
+  "Return the visible contents of the selected window from INFO's frame state.
+The frame state JSON stores visual lines as a \"lines\" array; this
+function concatenates them into a single string."
   (let ((state (json-parse-string
                 (read (llm-test--eval-in-emacs info
                                                llm-test--frame-state-elisp))
                 :object-type 'alist
                 :array-type 'list)))
-    (alist-get "contents"
-               (llm-test-test--selected-window state)
-               nil nil #'string=)))
+    (let ((lines (alist-get "lines"
+                            (llm-test-test--selected-window state)
+                            nil nil #'string=)))
+      (when lines
+        (mapconcat #'identity lines "")))))
 
 (defun llm-test-test--testscripts-directory ()
   "Return the absolute path to the sample YAML test scripts."
@@ -186,9 +190,9 @@
                 (visible (llm-test-test--selected-window-contents info)))
             (should (= total-lines 100))
             ;; Visible content should be non-empty and no longer than the buffer.
-            (let ((visible-lines (length (split-string visible "\n" t))))
-              (should (<= visible-lines 100))
-              (should (> visible-lines 0)))))
+            (should visible)
+            (should (> (length visible) 0))
+            (should (<= (length (split-string visible "\n" t)) 100))))
       (llm-test--stop-emacs info))))
 
 (ert-deftest llm-test-visible-buffer-contents-include-overlay-after-string ()
