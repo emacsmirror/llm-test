@@ -6,7 +6,7 @@
 ;; Homepage: https://github.com/ahyatt/llm-test
 ;; Package-Requires: ((emacs "29.1") (llm "0.18.0") (yaml "0.5.0") (futur "1.2"))
 ;; Keywords: testing, tools
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
 ;; This program is free software; you can redistribute it and/or

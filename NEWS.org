@@ -1,3 +1,5 @@
+* 0.2.2
+- Fixes to =type-text= to input the text more realistically.
 * 0.2.1
 - Add ~type-text~ tool for reliable text entry.
 - Support enhanced debug mode with ~llm-test-debug~ or the ~LLM_TEST_DEBUG~ environment variable.
