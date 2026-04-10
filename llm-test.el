@@ -403,7 +403,7 @@ plist with :process, :server-name, :socket-dir, and :init-file."
       frame-info)))
 
 (defun llm-test--wrap-eval-with-tempfile (sexp tempfile)
-  "Return elisp that evals SEXP and writes the printed result to TEMPFILE.
+  "Return elisp that evaluate SEXP and writes the printed result to TEMPFILE.
 
 Used to work around an Emacs server bug: `server-reply-print' chunks
 its responses by *character* count even though `server-msg-size' is a
@@ -702,7 +702,7 @@ each pair of adjacent literal-text tokens so the parsed key sequence
 preserves the intended spacing.  Tokens that look like kbd notation
 \(modifier chords, function keys, reserved key names, single
 characters) are left untouched, so existing call sites such as
-\"M-x ekg-org-view RET\" continue to work."
+`M-x ekg-org-view RET' continue to work."
   (let* ((tokens (split-string keys "[ \t\n]+" t))
          (result nil)
          (prev-text nil))
