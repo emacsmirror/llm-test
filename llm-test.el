@@ -402,49 +402,127 @@ plist with :process, :server-name, :socket-dir, and :init-file."
                llm-test-frame-width llm-test-frame-height))
       frame-info)))
 
+(defun llm-test--wrap-eval-with-tempfile (sexp tempfile)
+  "Return elisp that evaluate SEXP and writes the printed result to TEMPFILE.
+
+Used to work around an Emacs server bug: `server-reply-print' chunks
+its responses by *character* count even though `server-msg-size' is a
+*byte* budget, so long replies that contain multibyte characters
+overflow emacsclient's read buffer mid-stream.  emacsclient then
+prints `*ERROR*: Unknown message: …' lines into the response, losing
+data.  Routing the result through a temp file means the only thing
+the protocol has to carry is the success/failure marker, which is
+small and pure ASCII.
+
+The wrapped form writes either the `pp'-printed result or, on error,
+a single line beginning with `LLM-TEST-ERROR: ' followed by the error
+message.  It returns t on success and the symbol `llm-test-error' on
+failure so the caller can fall back on the marker if reading the file
+fails."
+  (format "(condition-case llm-test--err
+              (let ((llm-test--result (progn %s)))
+                (with-temp-file %S
+                  (let ((coding-system-for-write 'utf-8)
+                        (standard-output (current-buffer))
+                        (print-escape-newlines nil)
+                        (print-escape-nonascii nil))
+                    (pp llm-test--result)))
+                t)
+            (error
+             (ignore-errors
+               (with-temp-file %S
+                 (let ((coding-system-for-write 'utf-8))
+                   (insert \"LLM-TEST-ERROR: \"
+                           (error-message-string llm-test--err)))))
+             'llm-test-error))"
+          sexp tempfile tempfile))
+
+(defun llm-test--read-eval-tempfile (tempfile)
+  "Read TEMPFILE as UTF-8 and return its trimmed contents.
+Signals an error if the file is missing, empty, or contains an
+`LLM-TEST-ERROR:' marker."
+  (unless (file-exists-p tempfile)
+    (error "Eval result file %s was not written" tempfile))
+  (let ((content (with-temp-buffer
+                   (let ((coding-system-for-read 'utf-8))
+                     (insert-file-contents tempfile))
+                   (string-trim (buffer-string)))))
+    (when (string-empty-p content)
+      (error "Eval result file %s is empty" tempfile))
+    (if (string-prefix-p "LLM-TEST-ERROR: " content)
+        (error "%s" (substring content (length "LLM-TEST-ERROR: ")))
+      content)))
+
 (defun llm-test--eval-in-emacs (emacs-info sexp)
   "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
 SEXP should be a string of elisp to evaluate.
-Returns the result as a string.  Times out after `llm-test-timeout' seconds.
-Uses `call-process' to avoid processing other async events (like LLM
-API responses) while waiting, which would cause re-entrant callbacks."
+Returns the printed result as a string.  Times out after
+`llm-test-timeout' seconds.
+
+Uses `call-process' to avoid processing other async events (like
+LLM API responses) while waiting, which would cause re-entrant
+callbacks.
+
+Routes the result through a host-side temp file rather than through
+emacsclient's reply protocol — see
+`llm-test--wrap-eval-with-tempfile' for the rationale."
   (let* ((server-name (plist-get emacs-info :server-name))
-         (socket-dir (plist-get emacs-info :socket-dir)))
-    (with-temp-buffer
-      (let ((exit-code
-             (call-process "emacsclient" nil t nil
-                           (format "--socket-name=%s"
-                                   (expand-file-name server-name socket-dir))
-                           "--eval" sexp)))
-        (if (= exit-code 0)
-            (string-trim (buffer-string))
-          (error "Emacsclient eval failed (exit %d): %s"
-                 exit-code (buffer-string)))))))
+         (socket-dir (plist-get emacs-info :socket-dir))
+         (tempfile (make-temp-file "llm-test-eval-result-"))
+         (wrapped (llm-test--wrap-eval-with-tempfile sexp tempfile)))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((exit-code
+                 (call-process "emacsclient" nil t nil
+                               (format "--socket-name=%s"
+                                       (expand-file-name server-name socket-dir))
+                               "--eval" wrapped)))
+            (unless (= exit-code 0)
+              (error "Emacsclient eval failed (exit %d): %s"
+                     exit-code (string-trim (buffer-string))))
+            (llm-test--read-eval-tempfile tempfile)))
+      (ignore-errors (delete-file tempfile)))))
 
 (defun llm-test--eval-in-emacs-async (emacs-info sexp)
   "Evaluate SEXP in the test Emacs process described by EMACS-INFO.
 SEXP should be a string of elisp to evaluate.
-Returns a `futur' that resolves to the result string, or signals an
-error if emacsclient fails.  Unlike `llm-test--eval-in-emacs', this
-does not block the Emacs event loop."
+Returns a `futur' that resolves to the printed result, or signals
+an error if emacsclient fails.  Unlike `llm-test--eval-in-emacs',
+this does not block the Emacs event loop.
+
+Uses the same temp-file side channel as `llm-test--eval-in-emacs'."
   (let* ((server-name (plist-get emacs-info :server-name))
          (socket-dir (plist-get emacs-info :socket-dir))
-         (buf (generate-new-buffer " *llm-test-eval*" t)))
+         (tempfile (make-temp-file "llm-test-eval-result-"))
+         (wrapped (llm-test--wrap-eval-with-tempfile sexp tempfile))
+         (buf (generate-new-buffer " *llm-test-eval*" t))
+         (cleanup (lambda ()
+                    (ignore-errors (delete-file tempfile))
+                    (when (buffer-live-p buf) (kill-buffer buf)))))
     (futur-let*
         ((exit-code <- (futur-process-call
                         "emacsclient" nil buf nil
                         (format "--socket-name=%s"
                                 (expand-file-name server-name socket-dir))
-                        "--eval" sexp))
-         (output (with-current-buffer buf
-                   (prog1 (string-trim (buffer-string))
-                     (kill-buffer buf)))))
-      (if (= exit-code 0)
-          (futur-done output)
-        (futur-failed
-         (list 'error
-               (format "Emacsclient eval failed (exit %d): %s"
-                       exit-code output)))))))
+                        "--eval" wrapped)))
+      (let ((stdout (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        (string-trim (buffer-string))))))
+        (cond
+         ((/= exit-code 0)
+          (funcall cleanup)
+          (futur-failed
+           (list 'error
+                 (format "Emacsclient eval failed (exit %d): %s"
+                         exit-code (or stdout "")))))
+         (t
+          (condition-case err
+              (let ((result (llm-test--read-eval-tempfile tempfile)))
+                (funcall cleanup)
+                (futur-done result))
+            (error
+             (funcall cleanup)
+             (futur-failed (list 'error (error-message-string err)))))))))))
 
 (defun llm-test--stop-emacs (emacs-info)
   "Stop the test Emacs process described by EMACS-INFO."
@@ -598,6 +676,44 @@ The returned wrapper is also async (takes callback as first arg)."
                   (futur-done nil))))
              args))))
 
+(defconst llm-test--reserved-key-names
+  '("RET" "SPC" "TAB" "ESC" "DEL" "BS" "NUL" "LFD"
+    "BACKSPACE" "RETURN" "ESCAPE" "INSERT"
+    "HOME" "END" "UP" "DOWN" "LEFT" "RIGHT" "PRIOR" "NEXT")
+  "Token names that the kbd parser treats as named keys, not literal text.")
+
+(defun llm-test--key-token-text-p (token)
+  "Return non-nil if TOKEN should be treated as literal text by `send-keys'.
+Returns nil if TOKEN looks like a kbd-notation key (modifier prefix,
+angle-bracketed function key, reserved key name, or single character)."
+  (and (> (length token) 1)
+       (not (string-match-p "\\`[CSAHMs]-" token))
+       (not (string-match-p "\\`<.*>\\'" token))
+       (not (member token llm-test--reserved-key-names))))
+
+(defun llm-test--rewrite-key-sequence (keys)
+  "Rewrite KEYS so spaces between literal-text tokens become real spaces.
+
+The kbd parser treats every space as a token separator and discards
+literal spaces, so a phrase like \"do taxes RET\" parses as the keys
+\"d o t a x e s RET\" — with the space between \"do\" and \"taxes\"
+silently dropped.  This helper inserts an explicit \"SPC\" token between
+each pair of adjacent literal-text tokens so the parsed key sequence
+preserves the intended spacing.  Tokens that look like kbd notation
+\(modifier chords, function keys, reserved key names, single
+characters) are left untouched, so existing call sites such as
+`M-x ekg-org-view RET' continue to work."
+  (let* ((tokens (split-string keys "[ \t\n]+" t))
+         (result nil)
+         (prev-text nil))
+    (dolist (token tokens)
+      (let ((is-text (llm-test--key-token-text-p token)))
+        (when (and is-text prev-text)
+          (push "SPC" result))
+        (push token result)
+        (setq prev-text is-text)))
+    (mapconcat #'identity (nreverse result) " ")))
+
 (defun llm-test--make-tools (emacs-info suggestions)
   "Create the list of `llm-tool' structs for the test agent.
 EMACS-INFO is the plist from `llm-test--start-emacs'.
@@ -685,7 +801,7 @@ and you should answer it with `type-text' or `send-keys'."
                                     (listify-key-sequence (kbd %S))))
                       (format \"Keys queued (%%s pending)\"
                               (length unread-command-events)))"
-                   keys))
+                   (llm-test--rewrite-key-sequence keys)))
                  (lambda (result)
                    (funcall callback result)
                    (futur-done nil))
@@ -698,7 +814,22 @@ and you should answer it with `type-text' or `send-keys'."
     :description "Send a key sequence to the test Emacs, as if typed by a user.
 Use Emacs key notation (e.g. \"C-x C-f\", \"M-x\", \"RET\").
 
-IMPORTANT: Literal spaces in the input string are ignored by the key parser. Use 'SPC' to type a space (e.g. \"H e l l o SPC w o r l d\"). For typing long strings of text, use the 'type-text' tool instead.
+The input is parsed as space-separated tokens.  Tokens that look like
+kbd notation — modifier chords (\"C-c\", \"M-x\"), function keys
+(\"<f1>\", \"<up>\"), reserved names (\"RET\", \"SPC\", \"TAB\",
+\"ESC\", \"DEL\", \"BACKSPACE\", arrow names, etc.), and single
+characters — are dispatched as keys.  Multi-character word tokens are
+typed literally, and a literal space character is inserted between
+each pair of adjacent word tokens so phrases survive intact.
+
+Examples:
+- \"M-x ekg-org-view RET\"   -> M-x, type \"ekg-org-view\", RET
+- \"do taxes RET\"           -> type \"do taxes\", RET
+- \"C-x C-f /tmp/foo RET\"   -> C-x C-f, type \"/tmp/foo\", RET
+- \"H e l l o SPC w o r l d\"-> single-char keys with explicit SPC
+
+For typing long paragraphs of literal text, prefer the `type-text'
+tool.
 
 This is non-blocking: it queues the keys and returns immediately.
 The keys are processed by the Emacs command loop after this call
@@ -709,7 +840,7 @@ effect of the keys; call eval-elisp with a no-op expression such as
 If a key triggers a command that prompts for input (completing-read,
 read-string, etc.), the minibuffer will become active, which will be
 visible in the frame state.  Call send-keys again with the response
-\(e.g. \"D O N E RET\").  The keys are fed directly into the active
+\(e.g. \"DONE RET\").  The keys are fed directly into the active
 prompt."
     :args (list (list :name "keys" :type 'string
                       :description "Key sequence in Emacs notation.")))
