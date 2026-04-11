@@ -333,13 +333,19 @@ The YAML should contain a single group document with keys:
           (setq windows
                 (vconcat windows
                          (list
-                          (list :number win-num
-                                :buffer name
-                                :mode (with-current-buffer buf (symbol-name major-mode))
-                                :point (with-current-buffer buf (point))
-                                :lines (apply #'vector (llm-test--window-lines w))))))
+                          (let ((hdr (with-current-buffer buf
+                                       (when header-line-format
+                                         (format-mode-line header-line-format nil w buf)))))
+                            (append
+                             (list :number win-num
+                                   :buffer name
+                                   :mode (with-current-buffer buf (symbol-name major-mode))
+                                   :point (with-current-buffer buf (point))
+                                   :lines (apply #'vector (llm-test--window-lines w)))
+                             (when hdr (list :header-line hdr)))))))
           (setq win-num (1+ win-num)))))
-    (let ((mini-win (active-minibuffer-window)))
+    (let ((mini-win (active-minibuffer-window))
+          (msg (current-message)))
       (json-encode
        (list :selected-window
              (list :number selected-win-num
@@ -350,7 +356,8 @@ The YAML should contain a single group document with keys:
                                (list :active t
                                      :prompt (or (minibuffer-prompt) \"\")
                                      :input (minibuffer-contents-no-properties)))
-                           (list :active nil)))))))"
+                           (list :active nil))
+             :message (or msg :json-null))))))"
   "Elisp code to be loaded in the test Emacs to support frame state capture.")
 
 (defconst llm-test--frame-state-elisp
@@ -929,14 +936,16 @@ JSON snapshot of the entire Emacs frame.  The JSON has this structure:
       \"buffer\": \"<buffer name>\",
       \"mode\": \"<major mode>\",
       \"point\": <integer>,
-      \"lines\": [\"<visual line 1>\", \"<visual line 2>\", ...]
+      \"lines\": [\"<visual line 1>\", \"<visual line 2>\", ...],
+      \"header-line\": \"<header line text>\"  // only when present
     }
   ],
   \"minibuffer\": {
     \"active\": true/false,
     \"prompt\": \"<prompt text>\",   // only when active
     \"input\": \"<input so far>\"    // only when active
-  }
+  },
+  \"message\": \"<echo area message>\" or null
 }
 
 The top-level \"selected-window\" tells you which window currently has focus \
@@ -944,6 +953,16 @@ The top-level \"selected-window\" tells you which window currently has focus \
 window.  If it is not the window you need, switch to the right one before \
 continuing (e.g. run-command \"switch-to-buffer\" or send-keys \"C-x b\").  \
 Note that the same buffer can appear in multiple windows.
+
+The \"message\" field contains the current echo-area message (if any).  \
+Messages often contain important hints such as available keybindings, \
+mode instructions, or status updates.  Always read the message — it may \
+tell you what keys to press next.
+
+The per-window \"header-line\" field, when present, contains the text shown \
+in the header line at the top of that window.  Header lines often display \
+contextual information such as column names, navigation breadcrumbs, or \
+mode-specific status.  Not all windows have a header line.
 
 The window \"lines\" field is an array of strings, each representing a single \
 visual line on the screen.  If a long line of text is wrapped by Emacs \
