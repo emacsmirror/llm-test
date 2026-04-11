@@ -12,9 +12,12 @@
 
 (defun llm-test-test--selected-window (state)
   "Return the selected window object from parsed frame STATE."
-  (let ((windows (alist-get "windows" state nil nil #'string=)))
+  (let ((windows (alist-get "windows" state nil nil #'string=))
+        (sel-num (alist-get "number"
+                            (alist-get "selected-window" state nil nil #'string=)
+                            nil nil #'string=)))
     (seq-find (lambda (window)
-                (eq (alist-get "selected" window nil nil #'string=) t))
+                (equal (alist-get "number" window nil nil #'string=) sel-num))
               windows)))
 
 (defun llm-test-test--selected-window-contents (info)

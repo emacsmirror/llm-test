@@ -855,13 +855,11 @@ prompt."
 
    (make-llm-tool
     :function (lambda (callback seconds)
-                (let ((secs (if (numberp seconds) seconds
-                              (string-to-number (format "%s" seconds)))))
-                  (run-at-time (max 0.1 (min secs 60)) nil
+                (let ((secs (max 0.1 (min (float seconds) 60))))
+                  (run-at-time secs nil
                                (lambda ()
                                  (funcall callback
-                                          (format "Slept %.1f seconds" secs))
-                                 (futur-done nil)))))
+                                          (format "Slept %.1f seconds" secs))))))
     :name "sleep"
     :async t
     :description "Pause for the given number of seconds before returning.
