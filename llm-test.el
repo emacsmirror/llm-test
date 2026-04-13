@@ -357,7 +357,7 @@ The YAML should contain a single group document with keys:
                                      :prompt (or (minibuffer-prompt) \"\")
                                      :input (minibuffer-contents-no-properties)))
                            (list :active nil))
-             :message (or msg :json-null))))))"
+             :message msg)))))"
   "Elisp code to be loaded in the test Emacs to support frame state capture.")
 
 (defconst llm-test--frame-state-elisp
@@ -778,9 +778,13 @@ The expression is evaluated in the context of the currently selected window's bu
                  (llm-test--eval-in-emacs-async
                   emacs-info
                   (format
-                   "(with-current-buffer (window-buffer (selected-window))
-                      (call-interactively '%s)
-                      \"Command executed\")"
+                   "(progn
+                      (run-at-time 0 nil
+                        (lambda ()
+                          (with-current-buffer
+                              (window-buffer (selected-window))
+                            (call-interactively '%s))))
+                      \"Command scheduled\")"
                    command))
                  (lambda (result)
                    (funcall callback result)
@@ -798,9 +802,13 @@ Use this when you know the exact command name — it is more reliable
 than typing it through `send-keys' with `M-x', since it avoids
 minibuffer completion issues and typos.
 
+Like send-keys, this is non-blocking: the command is scheduled and
+may not have executed before the frame state is captured.  Call
+sleep with 0 seconds afterwards to get a fresh snapshot.
+
 If the command reads input from the minibuffer (e.g. a file name or
-search string), the minibuffer will become active after this call
-and you should answer it with `type-text' or `send-keys'."
+search string), the minibuffer will become active and you should
+answer it with `type-text' or `send-keys'."
     :args (list (list :name "command" :type 'string
                       :description "The Emacs command name (e.g. \"ekg-org-view\", \"save-buffer\").")))
 
@@ -849,8 +857,8 @@ tool.
 This is non-blocking: it queues the keys and returns immediately.
 The keys are processed by the Emacs command loop after this call
 returns.  The frame state in the response may not yet reflect the
-effect of the keys; call eval-elisp with a no-op expression such as
-\"t\" to get an updated frame state if needed.
+effect of the keys; call sleep with 0 seconds to get an updated
+frame state if needed.
 
 If a key triggers a command that prompts for input (completing-read,
 read-string, etc.), the minibuffer will become active, which will be
@@ -982,7 +990,7 @@ buffer or minibuffer.  This preserves spaces and special characters.
 commands.  Spaces between multi-character word tokens are preserved \
 automatically, but prefer type-text for longer text input.
 - send-keys is non-blocking: the keys may not be processed before the frame \
-state is captured.  Call eval-elisp with \"t\" if you need a fresh snapshot.
+state is captured.  Call sleep with 0 seconds if you need a fresh snapshot.
 - Do not batch send-keys across UI state transitions such as opening the \
 minibuffer, entering an insertion mode, or waiting for a prompt.  Send a small \
 action, refresh, then respond to what is visible.
